@@ -1,5 +1,6 @@
 #include <iostream>
 #include <vector>
+#include <map>
 #include <stdio.h>
 #include <stdint.h>
 #include <cstring>
@@ -17,12 +18,15 @@ typedef int16_t i16;
 typedef int32_t i32;
 typedef int64_t i64;
 
+void repl();
+
 #define EC_8BITCOLOR(colorstr, boldstr) \
     "\x1B[" boldstr ";38;5;" colorstr "m"
 const char* g_red_color = EC_8BITCOLOR("196", "0");
 const char* g_reset_color = "\x1B[0m";
 
 enum TokenKind {
+    TK_IDENT,
     TK_NUMBER,
     TK_STRING,
     TK_PLUS,
@@ -32,6 +36,10 @@ enum TokenKind {
     TK_SEMICOLON,
     TK_LPAREN,
     TK_RPAREN,
+    TK_EQUAL,
+    TK_EQ_EQ,
+    TK_NOT_EQ,
+    TK_NOT,
     TK_EOF,
 };
 
@@ -42,6 +50,7 @@ public:
     union {
         double number;
         char* str;
+        char* ident;
     };
 
     Token(TokenKind kind, int pos) {
@@ -52,15 +61,18 @@ public:
 
 enum NodeKind {
     NK_EXPR_STMT,
+    NK_ASSIGN_STMT,
     NK_BINARY,
     NK_UNARY,
     NK_NUMBER,
     NK_STRING,
+    NK_IDENT,
 };
 
 enum ValueKind {
     VK_NUMBER,
     VK_STRING,
+    VK_BOOL,
     VK_NULL,
 };
 
@@ -70,6 +82,7 @@ public:
     union {
         double number;
         char* str;
+        bool boolean;
     };
 
     static Value make_number(double num) {
@@ -87,6 +100,13 @@ public:
         return v;
     }
 
+    static Value make_bool(bool b) {
+        Value v;
+        v.kind = VK_BOOL;
+        v.boolean = b;
+        return v;
+    }
+
     static Value make_null() {
         Value v;
         v.kind = VK_NULL;
@@ -101,6 +121,9 @@ public:
             case VK_STRING:
                 cout << '"' << str << '"';
                 break;
+            case VK_BOOL:
+                cout << (boolean ? "true" : "false");
+                break;
             case VK_NULL:
                 cout << "(null)";
                 break;
@@ -111,6 +134,7 @@ public:
         switch (kind) {
             case VK_NUMBER: return "number";
             case VK_STRING: return "string";
+            case VK_BOOL: return "boolean";
         }
         assert(0);
         return "";
@@ -134,8 +158,13 @@ public:
 
         AstNode* expr_stmt;
 
+        struct {
+            AstNode* left, *right;
+        } assign;
+
         double num;
         char* str;
+        char* ident;
     };
 
     static AstNode* make_expr_stmt(AstNode* child, Token* mark) {
@@ -143,6 +172,15 @@ public:
         n->kind = NK_EXPR_STMT;
         n->mark = mark;
         n->expr_stmt = child;
+        return n;
+    }
+
+    static AstNode* make_assign_stmt(AstNode* left, AstNode* right, Token* mark) {
+        AstNode* n = new AstNode;
+        n->kind = NK_ASSIGN_STMT;
+        n->mark = mark;
+        n->assign.left = left;
+        n->assign.right = right;
         return n;
     }
 
@@ -180,11 +218,19 @@ public:
         n->str = token->str;
         return n;
     }
+
+    static AstNode* make_ident(Token* token) {
+        AstNode* n = new AstNode;
+        n->kind = NK_IDENT;
+        n->mark = token;
+        n->ident = token->ident;
+        return n;
+    }
 };
 
 void error(const std::string& msg, int at) {
     cout << g_red_color << "(input):1:" << at << ": error: " << g_reset_color << msg << endl;
-    exit(-1);
+    repl();
 }
 
 void error(const std::string& msg, Token* token) {
@@ -195,6 +241,8 @@ class Interpreter {
 public:
     void interpret_nodes(std::vector<AstNode*> nodes);
     Value interpret(AstNode* node);
+
+    std::map<std::string, Value> lookup;
 };
 
 void Interpreter::interpret_nodes(std::vector<AstNode*> nodes) {
@@ -212,43 +260,78 @@ Value Interpreter::interpret(AstNode* node) {
             return v;
         };
 
+        case NK_ASSIGN_STMT: {
+            Value child = interpret(node->assign.right);
+            lookup[std::string(node->assign.left->ident)] = child;
+            return Value::make_null();
+        } break;
+
         case NK_BINARY: {
             Value a = interpret(node->bin.left);
             Value b = interpret(node->bin.right);
             if (a.kind != b.kind) {
-                error("Type mismatch: " + a.stringify_kind() + " and " + b.stringify_kind(), node->mark);
+                error("type mismatch: " + a.stringify_kind() + " and " + b.stringify_kind(), node->mark);
             }
 
-            switch (a.kind) {
-                case VK_NUMBER: {
-                    double res;
-                    switch (node->bin.op) {
-                        case '+': res = a.number + b.number; break;
-                        case '-': res = a.number - b.number; break;
-                        case '*': res = a.number * b.number; break;
-                        case '/': {
-                            if (b.number == 0.0) {
-                                error("Division by zero", node->mark);
-                            }
-                            res = a.number / b.number;
-                        } break;
-                    }
-                    return Value::make_number(res);
-                } break;
+            if (node->bin.op == '=' || node->bin.op == '!') {
+                bool res;
+                switch (a.kind) {
+                    case VK_NUMBER: {
+                        switch (node->bin.op) {
+                            case '=': res = a.number == b.number; break;
+                            case '!': res = a.number != b.number; break;
+                        }
+                    } break;
 
-                case VK_STRING: {
-                    if (node->bin.op != '+') {
-                        error(std::string("Invalid operation with strings: ") + "`" + node->bin.op + "`", node->mark);
-                    }
-                    return Value::make_string((std::string(a.str) + std::string(b.str)).c_str());
-                } break;
+                    case VK_BOOL: {
+                        switch (node->bin.op) {
+                            case '=': res = a.boolean == b.boolean; break;
+                            case '!': res = a.boolean != b.boolean; break;
+                        }
+                    } break;
+
+                    case VK_STRING: {
+                        if (strcmp(a.str, b.str) == 0) res = true;
+                        else res = false;
+                    } break;
+                }
+                return Value::make_bool(res);
+            } else {
+                switch (a.kind) {
+                    case VK_NUMBER: {
+                        double res;
+                        switch (node->bin.op) {
+                            case '+': res = a.number + b.number; break;
+                            case '-': res = a.number - b.number; break;
+                            case '*': res = a.number * b.number; break;
+                            case '/': {
+                                if (b.number == 0.0) {
+                                    error("Division by zero", node->mark);
+                                }
+                                res = a.number / b.number;
+                            } break;
+                        }
+                        return Value::make_number(res);
+                    } break;
+
+                    case VK_STRING: {
+                        if (node->bin.op != '+') {
+                            error(std::string("invalid operation with strings: ") + "`" + node->bin.op + "`", node->mark);
+                        }
+                        return Value::make_string((std::string(a.str) + std::string(b.str)).c_str());
+                    } break;
+
+                    case VK_BOOL: {
+                        error("cannot apply arithmetic to booleans", node->mark);
+                    } break;
+                }
             }
         } break;
 
         case NK_UNARY: {
             Value child = interpret(node->un.child);
             if (child.kind != VK_NUMBER) {
-                error("Unary `-` cannot be applied to " + child.stringify_kind(), node->mark);
+                error("unary `-` cannot be applied to " + child.stringify_kind(), node->mark);
             }
             return Value::make_number(-child.number);
         } break;
@@ -259,6 +342,18 @@ Value Interpreter::interpret(AstNode* node) {
 
         case NK_STRING: {
             return Value::make_string(node->str);
+        } break;
+
+        case NK_IDENT: {
+            std::string ident = std::string(node->ident);
+            if (ident == "true") return Value::make_bool(true);
+            else if (ident == "false") return Value::make_bool(false);
+
+            auto it = lookup.find(ident);
+            if (it == lookup.end()) {
+                error("unresolved symbol `" + ident + '`', node->mark);
+            }
+            return it->second;
         } break;
     }
     assert(0);
@@ -279,6 +374,7 @@ private:
 
     AstNode* parse_stmt();
     AstNode* parse_expr();
+    AstNode* parse_cmp_binop();
     AstNode* parse_add_binop();
     AstNode* parse_mul_binop();
     AstNode* parse_unop();
@@ -329,12 +425,39 @@ void Parser::parse(std::vector<Token*>* tokens) {
 
 AstNode* Parser::parse_stmt() {
     AstNode* node = parse_expr();
-    expect(TK_SEMICOLON, "semicolon");
-    return AstNode::make_expr_stmt(node, prev);
+    if (match(TK_EQUAL)) {
+        if (node->kind != NK_IDENT) {
+            error("only identifiers can be assigned to", prev);
+        }
+        Token* mark = prev;
+        AstNode* right = parse_expr();
+        //expect(TK_SEMICOLON, "semicolon");
+        return AstNode::make_assign_stmt(node, right, mark);
+    } else {
+        //expect(TK_SEMICOLON, "semicolon");
+        return AstNode::make_expr_stmt(node, prev);
+    }
+    assert(0);
+    return nullptr;
 }
 
 AstNode* Parser::parse_expr() {
-    return parse_add_binop();
+    return parse_cmp_binop();
+}
+
+AstNode* Parser::parse_cmp_binop() {
+    AstNode* left = parse_add_binop();
+    while (match(TK_EQ_EQ) || match(TK_NOT_EQ)) {
+        char op;
+        Token* op_tok = prev;
+        switch (op_tok->kind) {
+            case TK_EQ_EQ:   op = '='; break;
+            case TK_NOT_EQ:  op = '!'; break;
+        }
+        AstNode* right = parse_add_binop();
+        left = AstNode::make_binary(left, right, op, op_tok);
+    }
+    return left;
 }
 
 AstNode* Parser::parse_add_binop() {
@@ -389,6 +512,8 @@ AstNode* Parser::parse_atom() {
         AstNode* child = parse_expr();
         expect(TK_RPAREN, "closing parenthesis");
         return child;
+    } else if (match(TK_IDENT)) {
+        return AstNode::make_ident(prev);
     }
     error("invalid expression", current);
     return nullptr;
@@ -432,6 +557,24 @@ void Lexer::lex(std::string& input) {
                 tokens.push_back(new Token(TK_RPAREN, i));
             } break;
 
+            case '=': {
+                if (input[i+1] == '=') {
+                    tokens.push_back(new Token(TK_EQ_EQ, i));
+                    i++;
+                } else {
+                    tokens.push_back(new Token(TK_EQUAL, i));
+                }
+            } break;
+
+            case '!': {
+                if (input[i+1] == '=') {
+                    tokens.push_back(new Token(TK_NOT_EQ, i));
+                    i++;
+                } else {
+                    tokens.push_back(new Token(TK_NOT, i));
+                }
+            } break;
+
             case '1': case '2': case '3': case '4': case '5':
             case '6': case '7': case '8': case '9': case '0': {
                 size_t start = i;
@@ -447,6 +590,30 @@ void Lexer::lex(std::string& input) {
                 double num = atof(numstr.c_str());
                 Token* t = new Token(TK_NUMBER, start);
                 t->number = num;
+                tokens.push_back(t);
+                i--; // to counteract i++ in for loop
+            } break;
+
+            case 'a': case 'b': case 'c': case 'd': case 'e':
+            case 'f': case 'g': case 'h': case 'i': case 'j':
+            case 'k': case 'l': case 'm': case 'n': case 'o':
+            case 'p': case 'q': case 'r': case 's': case 't':
+            case 'u': case 'v': case 'w': case 'x': case 'y':
+            case 'z': case 'A': case 'B': case 'C': case 'D':
+            case 'E': case 'F': case 'G': case 'H': case 'I':
+            case 'J': case 'K': case 'L': case 'M': case 'N':
+            case 'O': case 'P': case 'Q': case 'R': case 'S':
+            case 'T': case 'U': case 'V': case 'W': case 'X':
+            case 'Y': case 'Z': case '_': {
+                size_t start = i;
+                i++;
+                while (isalpha(input[i]) || isdigit(input[i])) i++;
+                std::string substr = input.substr(start, i-start);
+                char* str = new char[substr.size()+1];
+                strcpy(str, substr.c_str());
+                str[substr.size()] = '\0';
+                Token* t = new Token(TK_IDENT, start);
+                t->ident = str;
                 tokens.push_back(t);
                 i--; // to counteract i++ in for loop
             } break;
@@ -475,29 +642,33 @@ void Lexer::lex(std::string& input) {
     tokens.push_back(new Token(TK_EOF, i));
 }
 
+Interpreter i;
+
+void repl() {
+    cout << "> ";
+    std::string input;
+    char ch;
+    while ((ch = getchar()) != '\n' && ch != EOF) {
+        input.push_back(ch);
+    }
+    input.push_back('\0');
+
+    Lexer l;
+    l.lex(input);
+    /*
+    for (int i = 0; i < l.tokens.size(); i++) {
+        cout << "TYPE: " << l.tokens[i]->kind << ", POS: " << l.tokens[i]->pos << endl;
+    }
+    */
+
+    Parser p;
+    p.parse(&l.tokens);
+
+    i.interpret_nodes(p.nodes);
+}
+
 int main() {
-    Interpreter i;
-
     while (true) {
-        cout << "> ";
-        std::string input;
-        char ch;
-        while ((ch = getchar()) != '\n' && ch != EOF) {
-            input.push_back(ch);
-        }
-        input.push_back('\0');
-
-        Lexer l;
-        l.lex(input);
-        /*
-        for (int i = 0; i < l.tokens.size(); i++) {
-            cout << "TYPE: " << l.tokens[i]->kind << ", POS: " << l.tokens[i]->pos << endl;
-        }
-        */
-
-        Parser p;
-        p.parse(&l.tokens);
-
-        i.interpret_nodes(p.nodes);
+        repl();
     }
 }
