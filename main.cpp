@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <cstring>
 #include <cassert>
+#include <setjmp.h>
 
 using namespace std;
 
@@ -19,6 +20,8 @@ typedef int32_t i32;
 typedef int64_t i64;
 
 void repl();
+
+jmp_buf jmpto;
 
 #define EC_8BITCOLOR(colorstr, boldstr) \
     "\x1B[" boldstr ";38;5;" colorstr "m"
@@ -230,7 +233,7 @@ public:
 
 void error(const std::string& msg, int at) {
     cout << g_red_color << "(input):1:" << at << ": error: " << g_reset_color << msg << endl;
-    repl();
+    longjmp(jmpto, 1);
 }
 
 void error(const std::string& msg, Token* token) {
@@ -349,7 +352,7 @@ Value Interpreter::interpret(AstNode* node) {
             if (ident == "true") return Value::make_bool(true);
             else if (ident == "false") return Value::make_bool(false);
 
-            auto it = lookup.find(ident);
+            std::map<std::string, Value>::iterator it = lookup.find(ident);
             if (it == lookup.end()) {
                 error("unresolved symbol `" + ident + '`', node->mark);
             }
@@ -414,7 +417,7 @@ private:
 void Parser::parse(std::vector<Token*>* tokens) {
     this->tokens = tokens;
     current = (*tokens)[0];
-    prev = nullptr;
+    prev = NULL;
     token_idx = 0;
 
     while (current->kind != TK_EOF) {
@@ -438,7 +441,7 @@ AstNode* Parser::parse_stmt() {
         return AstNode::make_expr_stmt(node, prev);
     }
     assert(0);
-    return nullptr;
+    return NULL;
 }
 
 AstNode* Parser::parse_expr() {
@@ -516,7 +519,7 @@ AstNode* Parser::parse_atom() {
         return AstNode::make_ident(prev);
     }
     error("invalid expression", current);
-    return nullptr;
+    return NULL;
 }
 
 class Lexer {
@@ -645,6 +648,7 @@ void Lexer::lex(std::string& input) {
 Interpreter i;
 
 void repl() {
+	setjmp(jmpto);
     cout << "> ";
     std::string input;
     char ch;
